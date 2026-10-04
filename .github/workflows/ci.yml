@@ -1,0 +1,102 @@
+name: BIL002 CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test-and-report:
+    name: test-and-report
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu çek (checkout)
+        uses: actions/checkout@v7
+
+      - name: Java 17 kurulumu (Temurin)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Maven bağımlılıklarını cache'le
+        uses: actions/cache@v6
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Checkstyle kontrolü
+        run: mvn -B checkstyle:check
+
+      - name: Derleme
+        run: mvn -B compile
+
+      # @Tag("hata") / @hata ile işaretlenmemiş tüm testler. Bunlar geçmek ZORUNDADIR.
+      - name: Testleri çalıştır
+        run: mvn -B test -DexcludedGroups=hata
+
+      - name: Test sonuçlarını ayır
+        if: always()
+        run: |
+          mkdir -p target/test-results/ana-testler target/test-results/hata-testleri
+          cp -r target/surefire-reports/. target/test-results/ana-testler/ 2>/dev/null || true
+          cp target/cucumber-report.html target/test-results/ana-testler/ 2>/dev/null || true
+          rm -rf target/surefire-reports
+
+      # Kasıtlı hataları yakalayan testler (@Tag("hata") / @hata). Kırmızı olmaları BEKLENİR;
+      # pipeline'ı kırmızıya çevirmezler. Kapsama verisi ana testlerle birleştirilir.
+      - name: Bulunan hata testlerini çalıştır (@hata)
+        id: hata_testleri
+        if: always()
+        continue-on-error: true
+        run: mvn -B test -Dgroups=hata
+
+      - name: Bulunan hata testlerinin özeti
+        if: always()
+        run: |
+          cp -r target/surefire-reports/. target/test-results/hata-testleri/ 2>/dev/null || true
+          python3 - <<'EOF'
+          import glob, os, xml.etree.ElementTree as ET
+          total = failed = 0
+          for path in glob.glob("target/test-results/hata-testleri/TEST-*.xml"):
+              root = ET.parse(path).getroot()
+              total += int(root.get("tests", 0))
+              failed += int(root.get("failures", 0)) + int(root.get("errors", 0))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("## Bulunan hata testleri (@hata)\n\n")
+              out.write(f"- Toplam: **{total}**\n- Hatayı yakalayan (kırmızı): **{failed}**\n")
+              out.write(f"- Geçen (hata artık yakalanmıyor olabilir): **{total - failed}**\n")
+          print(f"@hata testleri: toplam={total}, kirmizi={failed}")
+          EOF
+
+      - name: JaCoCo raporu üret
+        if: always()
+        run: mvn -B jacoco:report
+
+      - name: JaCoCo raporunu yükle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          if-no-files-found: warn
+
+      - name: Test sonuçlarını (Surefire XML) yükle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: target/test-results/
+          if-no-files-found: warn
+
+      - name: Checkstyle raporunu yükle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: checkstyle-report
+          path: target/checkstyle-result.xml
+          if-no-files-found: warn
